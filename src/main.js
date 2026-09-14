@@ -140,6 +140,9 @@ class Game {
       const startId = (atRoom && this.world.layout.rooms.has(atRoom)) ? atRoom : floor.entry;
       this.placeInRoom(startId, true);
 
+      // Build every shader this floor needs now, while the loading card is up.
+      this.world.precompile(this.renderer, this.camera);
+
       Audio.setAmbience(this.theme.ambientLoop);
       this.hud.setVisible(true);
       this.state.save();
@@ -413,6 +416,7 @@ class Game {
     this.applyDoorState();
     this.player.setPosition(pos.x, pos.z, pos.yaw);
     this.onRoomEnter(at, true);
+    this.world.precompile(this.renderer, this.camera);
   }
 
   setLoading(on, text) {
@@ -439,6 +443,10 @@ class Game {
       else if (!here) this.currentRoom = null;
 
       this.world.update(t, dt, this.player.pos);
+      if (this.world.shadowsDirty) {
+        this.renderer.requestShadowUpdate();
+        this.world.shadowsDirty = false;
+      }
 
       if (interactive && this.player.locked) {
         const room = this.lastRoom && this.world.roomAt(this.player.pos.x, this.player.pos.z);

@@ -75,12 +75,15 @@ function corner(ctx, i, inset = 2.4) {
 // Matches LIGHT_SCALE in builder.js: three.js point lights are in candela.
 const LIGHT_SCALE = 8;
 
+// Props no longer own lights. They record where a light should be, in
+// room-local space, and the builder turns that into a descriptor for the fixed
+// light pool. See lightpool.js for why nothing here may create a PointLight.
 function addLight(ctx, color, intensity, distance, x, y, z, flicker = 0) {
-  const scaled = intensity * LIGHT_SCALE;
-  const l = new THREE.PointLight(color, scaled, distance, 2);
-  l.position.set(x, y, z);
-  ctx.lights.push({ light: l, flicker, base: scaled });
-  return l;
+  ctx.lights.push({
+    x, y, z, color, distance, flicker,
+    intensity: intensity * LIGHT_SCALE
+  });
+  return null;
 }
 
 function anim(ctx, fn) { ctx.animated.push(fn); }
@@ -144,8 +147,7 @@ const PROPS = {
       const fire = new THREE.Mesh(geo('flame', () => new THREE.ConeGeometry(0.5, 1.15, 8)), mats.flame);
       fire.position.set(p.x, 2.25, p.z);
       g.add(fire);
-      const l = addLight(ctx, theme.lightPlan.color, 3.0, 15, p.x, 2.5, p.z, 0.45);
-      g.add(l);
+      addLight(ctx, theme.lightPlan.color, 3.0, 15, p.x, 2.5, p.z, 0.45);
       const seed = ctx.rng() * 100;
       anim(ctx, (t) => {
         const s = 0.86 + Math.sin(t * 11 + seed) * 0.1 + Math.sin(t * 19.3 + seed) * 0.06;
@@ -279,8 +281,7 @@ const PROPS = {
     const orb = new THREE.Mesh(geo('orb', () => new THREE.IcosahedronGeometry(0.34, 2)), mats.glow);
     orb.position.set(0, 1.65, -ctx.room.d * 0.24);
     g.add(orb);
-    const l = addLight(ctx, theme.accent, 2.6, 12, 0, 1.9, -ctx.room.d * 0.24, 0.08);
-    g.add(l);
+    addLight(ctx, theme.accent, 2.6, 12, 0, 1.9, -ctx.room.d * 0.24, 0.08);
     anim(ctx, (t) => {
       orb.position.y = 1.65 + Math.sin(t * 1.1) * 0.09;
       orb.rotation.y = t * 0.4;
@@ -399,7 +400,7 @@ const PROPS = {
       g.add(c);
       if (i < 3) lit.push(c.position.clone());
     }
-    for (const p of lit) g.add(addLight(ctx, theme.accent, 1.5, 10, p.x, p.y, p.z, 0.05));
+    for (const p of lit) addLight(ctx, theme.accent, 1.5, 10, p.x, p.y, p.z, 0.05);
   },
 
   roots(g, ctx) {
@@ -500,8 +501,7 @@ const PROPS = {
     const mouth = new THREE.Mesh(geo('forgeMouth', () => new THREE.BoxGeometry(2.2, 1.3, 0.3)), mats.flame);
     mouth.position.set(0, 1.3, z + 1.25);
     g.add(mouth);
-    const l = addLight(ctx, theme.lightPlan.color, 5.0, 22, 0, 1.4, z + 2.2, 0.3);
-    g.add(l);
+    addLight(ctx, theme.lightPlan.color, 5.0, 22, 0, 1.4, z + 2.2, 0.3);
     const anvil = new THREE.Mesh(geo('anvil', () => new THREE.BoxGeometry(1.5, 0.5, 0.6)), mats.metal);
     anvil.position.set(2.6, 1.0, z + 2.4);
     anvil.castShadow = true;
@@ -578,7 +578,7 @@ const PROPS = {
     inner.rotation.x = -Math.PI / 2;
     inner.position.y = 0.05;
     g.add(inner);
-    g.add(addLight(ctx, theme.accent2, 2.2, 11, 0, 0.7, 0, 0.1));
+    addLight(ctx, theme.accent2, 2.2, 11, 0, 0.7, 0, 0.1);
     anim(ctx, (t) => { inner.material.emissiveIntensity = 1.5 + Math.sin(t * 0.9) * 0.4; });
   },
 
@@ -624,7 +624,7 @@ const PROPS = {
     const glowPanel = new THREE.Mesh(geo('archGlow', () => new THREE.PlaneGeometry(3.6, 3.0)), mats.glow);
     glowPanel.position.set(0, 1.6, z - 0.62);
     g.add(glowPanel);
-    g.add(addLight(ctx, theme.accent, 3.4, 16, 0, 2.0, z + 1.2, 0.06));
+    addLight(ctx, theme.accent, 3.4, 16, 0, 2.0, z + 1.2, 0.06);
     anim(ctx, (t) => { glowPanel.material.emissiveIntensity = 2.0 + Math.sin(t * 1.3) * 0.45; });
   },
 
@@ -761,7 +761,7 @@ const PROPS = {
     g.add(im, fim);
     for (let i = 0; i < Math.min(3, spots.length); i++) {
       const s = spots[i * 7 % spots.length];
-      g.add(addLight(ctx, theme.lightPlan.color, 1.2, 8, s[0], s[1] + 0.4, s[2], 0.5));
+      addLight(ctx, theme.lightPlan.color, 1.2, 8, s[0], s[1] + 0.4, s[2], 0.5);
     }
   },
 
@@ -808,7 +808,7 @@ const PROPS = {
       const bulb = new THREE.Mesh(geo('bulb', () => new THREE.SphereGeometry(0.15, 8, 6)), mats.glow2);
       bulb.position.set(p.x, y - 0.22, p.z);
       g.add(bulb);
-      g.add(addLight(ctx, theme.lightPlan.color, 2.4, 15, p.x, y - 0.3, p.z, 0.05));
+      addLight(ctx, theme.lightPlan.color, 2.4, 15, p.x, y - 0.3, p.z, 0.05);
       const ph = rng() * 6;
       anim(ctx, (t) => {
         const sw = Math.sin(t * 0.5 + ph) * 0.012;
@@ -868,7 +868,7 @@ const PROPS = {
     const dial = new THREE.Mesh(geo('dial', () => new THREE.CircleGeometry(0.5, 16)), mats.glow2);
     dial.position.set(px, 1.5, pz + 0.92);
     g.add(dial);
-    g.add(addLight(ctx, theme.accent2, 1.3, 8, px, 1.5, pz + 1.6, 0.12));
+    addLight(ctx, theme.accent2, 1.3, 8, px, 1.5, pz + 1.6, 0.12);
     const needle = new THREE.Mesh(geo('needle', () => new THREE.BoxGeometry(0.04, 0.42, 0.02)), mats.metal);
     needle.position.set(px, 1.5, pz + 0.95);
     needle.geometry.translate(0, 0.21, 0);

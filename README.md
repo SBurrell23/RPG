@@ -129,11 +129,37 @@ its own doorway where one is available. The validator asserts both.
 
 Each floor has a `lightPlan` (sconce, pendant, floor, volume or none), a fog colour and
 density, an ambient and hemisphere pair, a cool bounce fill so shadows are not pure black,
-and its own bloom threshold. Lights are budgeted at runtime: only rooms adjacent to the one
-you are standing in are lit at all, and of those the nearest N get shadow maps, where N comes
-from the graphics settings. Point light intensities are in candela — three.js has used
+and its own bloom threshold. Point light intensities are in candela — three.js has used
 physical units since r155 — and are scaled from the themes' perceptual numbers by a single
 constant in `builder.js`.
+
+Crucially, **nothing in the game ever creates a light per fixture.** The ~300 torches,
+braziers, pendants and glows on a floor are stored as *descriptors*, and a fixed pool of N
+point lights (`src/world/lightpool.js`) is moved around to light whichever ones are nearest
+and currently visible.
+
+That indirection is not an optimisation flourish; it is the difference between playable and
+not. three.js bakes the number of visible point lights, and the number of those casting
+shadows, into every material's shader program key. Change either count and it must compile a
+new program for every material in the scene — lazily, inside the render call. The original
+build lit rooms by toggling `visible` and `castShadow` on individual fixtures as the player
+walked, so those counts moved constantly: a walk through seven rooms compiled 71 shader
+programs and froze for up to **1.9 seconds** at a time.
+
+With a fixed pool the permutation never moves, so everything compiles once. Alongside it:
+
+- `FloorWorld.precompile()` runs at floor load, behind the loading card, with every room
+  visible *and* frustum culling disabled — because a program only compiles when its object is
+  actually submitted, and a transmissive pool of water at the far end of the floor would
+  otherwise wait to compile until you walked into the room.
+- Shadow maps do not re-render every frame. Point-light shadows are cube maps — six scene
+  renders per light — and the dungeon is static, so `shadowMap.autoUpdate` is off and a
+  refresh is requested only when a pool light moves to a new fixture or a door opens.
+- Light selection re-sorts at most every 120ms, off precomputed world positions, rather than
+  walking the scene graph for every light every frame.
+
+Measured across all ten floors afterwards: **zero** programs compiled during play, and the
+worst single frame while hopping between rooms as fast as possible is ~30ms.
 
 ### Storage on a shared origin
 

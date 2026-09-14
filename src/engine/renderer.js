@@ -46,6 +46,21 @@ export class Renderer {
     const size = Settings.shadowMapSize();
     this.renderer.shadowMap.enabled = size > 0;
     this.renderer.shadowMap.type = size >= 4096 ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    // Point-light shadows are cube maps: six faces of the scene per light, per
+    // frame. The dungeon is static, so render them only when a light actually
+    // moves to a new fixture (see requestShadowUpdate).
+    this.renderer.shadowMap.autoUpdate = false;
+    this.renderer.shadowMap.needsUpdate = true;
+  }
+
+  requestShadowUpdate() {
+    this.renderer.shadowMap.needsUpdate = true;
+  }
+
+  // Compiles every program the scene needs, up front, so three.js never has to
+  // do it inside a render call while the player is walking around.
+  precompile(scene, camera) {
+    this.renderer.compile(scene, camera);
   }
 
   applyAnisotropy() {
@@ -130,7 +145,9 @@ export class Renderer {
           for (const m of mats) m.needsUpdate = true;
         }
       });
+      return 'refloor';   // the light pool is sized from this
     }
+    if (all || id === 'lights') return 'refloor';
     if (all || id === 'fov') {
       this.camera.fov = Settings.get('fov');
       this.camera.updateProjectionMatrix();

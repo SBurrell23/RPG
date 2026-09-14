@@ -8,6 +8,7 @@ import { MaterialSet } from './materials.js';
 import { buildProps, makeRng } from './props.js';
 import { createNpc } from './npc.js';
 import { KIND_ACCENTS } from '../data/themes.js';
+import { LightPool } from './lightpool.js';
 import * as Settings from '../engine/settings.js';
 import { pointSprite } from '../engine/textures.js';
 
@@ -36,7 +37,18 @@ export class FloorWorld {
     this.doors = new Map();           // key    -> { locked, meshes[], colliders[], opened }
     this.colliders = [];              // active AABBs
     this.animated = [];
-    this.allLights = [];
+    // Light *descriptors*, not lights. The pool below owns the only real
+    // PointLights in the scene; see lightpool.js.
+    this.lightDescs = [];
+    this.pool = new LightPool(scene, {
+      count: Settings.maxDynamicLights(),
+      shadowCount: Settings.maxShadowLights(),
+      shadowMapSize: Settings.shadowMapSize()
+    });
+    this._cands = [];
+    this._selectIn = 0;
+    this._pickToken = 0;
+    this.shadowsDirty = true;
     this.npcs = new Map();
     this.disposables = [];
     this.surfaceByRoom = new Map();
@@ -45,6 +57,24 @@ export class FloorWorld {
     this.buildCorridors();
     this.buildAtmosphere();
     this.rebuildColliders();
+  }
+
+  // Records a light without creating one. `owner` is the room id or corridor
+  // key whose visibility gates it.
+  addLightDesc({ x, y, z, color, intensity, distance, flicker = 0, owner, isCorridor = false, shadowWorthy }) {
+    const d = {
+      x, y, z,
+      color: new THREE.Color(color),
+      base: intensity,
+      distance,
+      flicker,
+      owner, isCorridor,
+      shadowWorthy: shadowWorthy !== undefined ? shadowWorthy : intensity > 1.2 * LIGHT_SCALE,
+      seed: this.lightDescs.length * 1.7,
+      dist: 0, pick: 0
+    };
+    this.lightDescs.push(d);
+    return d;
   }
 
   // ------------------------------------------------------------------ rooms
@@ -114,7 +144,13 @@ export class FloorWorld {
       };
       const props = buildProps(room.props, ctx);
       g.add(props);
-      for (const l of ctx.lights) { entry.lights.push(l); this.allLights.push(l); }
+      for (const l of ctx.lights) {
+        this.addLightDesc({
+          x: placed.x + l.x, y: l.y, z: placed.z + l.z,
+          color: l.color, intensity: l.intensity, distance: l.distance,
+          flicker: l.flicker, owner: room.id
+        });
+      }
       for (const a of ctx.animated) entry.animated.push(a);
       for (const c of ctx.colliders) {
         entry.colliders.push({
@@ -133,12 +169,17 @@ export class FloorWorld {
         entry.npc = npc;
         this.npcs.set(room.id, npc);
         entry.animated.push(npc.update);
-        const key = new THREE.PointLight(this.theme.accent2, 1.5 * LIGHT_SCALE, 9, 2);
-        key.position.set(1.6, 2.6, -placed.d * 0.16 + 1.8);
-        const keyRec = { light: key, flicker: 0, base: 1.5 * LIGHT_SCALE };
-        entry.lights.push(keyRec);
-        this.allLights.push(keyRec);
-        g.add(key);
+        this.addLightDesc({
+          x: placed.x + 1.6, y: 2.6, z: placed.z - placed.d * 0.16 + 1.8,
+          color: this.theme.accent2, intensity: 1.5 * LIGHT_SCALE, distance: 9,
+          owner: room.id
+        });
+        // the figure's own glow, so they read against the dark
+        this.addLightDesc({
+          x: placed.x, y: 1.5, z: placed.z - placed.d * 0.16,
+          color: npc.glowColor, intensity: 1.0 * LIGHT_SCALE, distance: 7.5,
+          owner: room.id, shadowWorthy: false
+        });
       }
 
       this.root.add(g);
@@ -277,17 +318,16 @@ export class FloorWorld {
       const n = Math.max(1, Math.round(len / lampEvery));
       for (let i = 0; i < n; i++) {
         const pt = pointAlong(p, ((i + 0.5) / n) * len);
-        const l = new THREE.PointLight(this.theme.lightPlan.color, 2.4 * LIGHT_SCALE, 13, 2);
-        l.position.set(pt.x, H * 0.72, pt.z);
-        g.add(l);
-        const rec = { light: l, flicker: this.theme.lightPlan.flicker * 0.7, base: 2.4 * LIGHT_SCALE };
-        entry.lights.push(rec);
-        this.allLights.push(rec);
+        this.addLightDesc({
+          x: pt.x, y: H * 0.72, z: pt.z,
+          color: this.theme.lightPlan.color, intensity: 2.4 * LIGHT_SCALE, distance: 13,
+          flicker: this.theme.lightPlan.flicker * 0.7, owner: c.key, isCorridor: true
+        });
         const bulb = new THREE.Mesh(
           new THREE.SphereGeometry(0.1, 7, 6),
           this.mats.flame
         );
-        bulb.position.copy(l.position);
+        bulb.position.set(pt.x, H * 0.72, pt.z);
         g.add(bulb);
         this.disposables.push(bulb.geometry);
       }
@@ -415,16 +455,16 @@ export class FloorWorld {
           : plan.style === 'floor' ? plan.height
           : plan.style === 'volume' ? Math.min(plan.height, placed.h * 0.4)
           : plan.height;
-        const l = new THREE.PointLight(plan.color, plan.intensity * LIGHT_SCALE, plan.distance, 2);
-        l.position.set(Math.cos(a) * rx, y, Math.sin(a) * rz);
-        entry.group.add(l);
-        const rec = { light: l, flicker: plan.flicker, base: plan.intensity * LIGHT_SCALE };
-        entry.lights.push(rec);
-        this.allLights.push(rec);
+        const lx = Math.cos(a) * rx, lz = Math.sin(a) * rz;
+        this.addLightDesc({
+          x: placed.x + lx, y, z: placed.z + lz,
+          color: plan.color, intensity: plan.intensity * LIGHT_SCALE, distance: plan.distance,
+          flicker: plan.flicker, owner: placed.room.id
+        });
 
         // the fitting itself, so the light has a visible source
         const fitting = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 6), this.mats.flame);
-        fitting.position.copy(l.position);
+        fitting.position.set(lx, y, lz);
         entry.group.add(fitting);
         this.disposables.push(fitting.geometry);
       }
@@ -432,21 +472,19 @@ export class FloorWorld {
 
     // cool bounce fill so shadows aren't pure black
     if (plan.fill && plan.fill.intensity > 0) {
-      const fill = new THREE.PointLight(plan.fill.color, plan.fill.intensity * LIGHT_SCALE * 1.1, placed.w * 1.25, 2);
-      fill.position.set(0, placed.h * 0.62, 0);
-      entry.group.add(fill);
-      const rec = { light: fill, flicker: 0, base: plan.fill.intensity * LIGHT_SCALE * 1.1, fill: true };
-      entry.lights.push(rec);
-      this.allLights.push(rec);
+      this.addLightDesc({
+        x: placed.x, y: placed.h * 0.62, z: placed.z,
+        color: plan.fill.color, intensity: plan.fill.intensity * LIGHT_SCALE * 1.1,
+        distance: placed.w * 1.25, owner: placed.room.id, shadowWorthy: false
+      });
     }
 
     if (kind && kind.intensity > 0) {
-      const l = new THREE.PointLight(kind.color, kind.intensity * LIGHT_SCALE, placed.w * 1.1, 2);
-      l.position.set(0, kind.height, 0);
-      entry.group.add(l);
-      const rec = { light: l, flicker: placed.room.kind === 'deadend' ? 0.3 : 0.05, base: kind.intensity * LIGHT_SCALE };
-      entry.lights.push(rec);
-      this.allLights.push(rec);
+      this.addLightDesc({
+        x: placed.x, y: kind.height, z: placed.z,
+        color: kind.color, intensity: kind.intensity * LIGHT_SCALE, distance: placed.w * 1.1,
+        flicker: placed.room.kind === 'deadend' ? 0.3 : 0.05, owner: placed.room.id
+      });
     }
   }
 
@@ -552,6 +590,7 @@ export class FloorWorld {
         for (const p of entry.panels) {
           p.mesh.position.y = p.closedY + (p.openY - p.closedY) * d.anim;
         }
+        this.shadowsDirty = true;   // a door moved; its shadow is now stale
       }
     }
   }
@@ -623,6 +662,43 @@ export class FloorWorld {
     }[this.theme.key] || 'stone';
   }
 
+  // Makes the whole floor visible for one compile pass so every material and
+  // geometry variant gets its program built during the loading screen, then
+  // restores whatever was visible before.
+  precompile(rendererWrapper, camera) {
+    const roomVis = new Map(), corrVis = new Map();
+    for (const [id, e] of this.roomGroups) { roomVis.set(id, e.group.visible); e.group.visible = true; }
+    for (const [k, e] of this.corridorGroups) { corrVis.set(k, e.group.visible); e.group.visible = true; }
+
+    // Visible is not enough: the render path frustum-culls, and a program only
+    // compiles when its object is actually submitted. A transmissive pool of
+    // water at the far end of the floor would otherwise wait until the player
+    // walked into the room and then compile mid-step. Submit everything.
+    const culled = [];
+    this.root.traverse((o) => {
+      if (o.isMesh || o.isPoints) { culled.push([o, o.frustumCulled]); o.frustumCulled = false; }
+    });
+
+    try {
+      rendererWrapper.renderer.compile(this.scene, camera);
+      // compile() builds surface programs but not the shadow-map depth programs,
+      // and a program's key also depends on the colour space of the target it is
+      // drawn into. So force a couple of real frames down the exact path the game
+      // uses — through the composer, into its linear target, with shadows on —
+      // with the whole floor visible. Everything compiles here, behind the
+      // loading card, instead of mid-walk.
+      for (let i = 0; i < 2; i++) {
+        rendererWrapper.requestShadowUpdate();
+        rendererWrapper.render();
+      }
+    } catch (e) { /* not fatal */ }
+
+    for (const [o, was] of culled) o.frustumCulled = was;
+    for (const [id, e] of this.roomGroups) e.group.visible = roomVis.get(id);
+    for (const [k, e] of this.corridorGroups) e.group.visible = corrVis.get(k);
+    this.shadowsDirty = true;
+  }
+
   // ------------------------------------------------------------ visibility
 
   setVisibleFrom(roomId) {
@@ -649,56 +725,20 @@ export class FloorWorld {
     for (const [k, e] of this.corridorGroups) e.group.visible = showCorr.has(k);
     this.visibleRooms = show;
     this.visibleCorridors = showCorr;
+    this._visDirty = true;
   }
 
-  // Keeps the active light count inside the user's budget, nearest-first.
+  // Chooses which descriptors the fixed pool should be lighting. Nothing here
+  // ever changes how many lights are visible or how many cast shadows — that
+  // would force three.js to recompile every material in the scene mid-frame.
   updateLights(camPos, t, dt) {
-    const budget = Settings.maxDynamicLights();
-    const shadowBudget = Settings.maxShadowLights();
-    const candidates = [];
-
-    for (const [id, e] of this.roomGroups) {
-      const on = !this.visibleRooms || this.visibleRooms.has(id);
-      for (const rec of e.lights) {
-        if (!on) { rec.light.visible = false; continue; }
-        rec.dist = rec.light.getWorldPosition(_v).distanceToSquared(camPos);
-        candidates.push(rec);
-      }
+    this._selectIn -= dt;
+    if (this._selectIn <= 0 || this._visDirty) {
+      this._selectIn = 0.12;
+      this._visDirty = false;
+      this.selectLights(camPos);
     }
-    for (const [k, e] of this.corridorGroups) {
-      const on = !this.visibleCorridors || this.visibleCorridors.has(k);
-      for (const rec of e.lights) {
-        if (!on) { rec.light.visible = false; continue; }
-        rec.dist = rec.light.getWorldPosition(_v).distanceToSquared(camPos);
-        candidates.push(rec);
-      }
-    }
-
-    candidates.sort((a, b) => a.dist - b.dist);
-    for (let i = 0; i < candidates.length; i++) {
-      const rec = candidates[i];
-      const active = i < budget;
-      rec.light.visible = active;
-      if (!active) { if (rec.light.castShadow) rec.light.castShadow = false; continue; }
-      const wantShadow = i < shadowBudget && !rec.fill && rec.base > 1.2 * LIGHT_SCALE;
-      if (rec.light.castShadow !== wantShadow) {
-        rec.light.castShadow = wantShadow;
-        if (wantShadow) {
-          const s = Settings.shadowMapSize();
-          rec.light.shadow.mapSize.set(s, s);
-          rec.light.shadow.camera.near = 0.25;
-          rec.light.shadow.camera.far = rec.light.distance || 20;
-          rec.light.shadow.bias = -0.004;
-          rec.light.shadow.normalBias = 0.035;
-        }
-      }
-      if (rec.flicker > 0) {
-        const n = Math.sin(t * 13.1 + rec.dist) * 0.5 + Math.sin(t * 27.7 + rec.dist * 1.7) * 0.3 + Math.sin(t * 5.3) * 0.2;
-        rec.light.intensity = rec.base * (1 + n * rec.flicker);
-      } else if (rec.light.intensity !== rec.base) {
-        rec.light.intensity = rec.base;
-      }
-    }
+    this.pool.animate(t);
 
     if (this.bolt) {
       this.nextBolt -= dt;
@@ -714,6 +754,48 @@ export class FloorWorld {
     }
   }
 
+  selectLights(camPos) {
+    const cands = this._cands;
+    cands.length = 0;
+    const token = ++this._pickToken;
+
+    for (const d of this.lightDescs) {
+      const on = d.isCorridor
+        ? (!this.visibleCorridors || this.visibleCorridors.has(d.owner))
+        : (!this.visibleRooms || this.visibleRooms.has(d.owner));
+      if (!on) continue;
+      const dx = d.x - camPos.x, dy = d.y - camPos.y, dz = d.z - camPos.z;
+      const dist = dx * dx + dy * dy + dz * dz;
+      // past its own reach it contributes nothing worth a pool slot
+      const reach = d.distance + 10;
+      if (dist > reach * reach) continue;
+      d.dist = dist;
+      d.pick = 0;
+      cands.push(d);
+    }
+
+    cands.sort(byDist);
+
+    const chosen = this._chosen || (this._chosen = []);
+    chosen.length = 0;
+    // shadow-casting slots come first, so they go to the nearest lights that
+    // are actually worth casting from
+    for (const d of cands) {
+      if (chosen.length >= this.pool.shadowCount) break;
+      if (!d.shadowWorthy) continue;
+      d.pick = token;
+      chosen.push(d);
+    }
+    for (const d of cands) {
+      if (chosen.length >= this.pool.count) break;
+      if (d.pick === token) continue;
+      d.pick = token;
+      chosen.push(d);
+    }
+
+    if (this.pool.assign(chosen)) this.shadowsDirty = true;
+  }
+
   update(t, dt, camPos) {
     for (const e of this.roomGroups.values()) {
       if (!e.group.visible) continue;
@@ -725,6 +807,7 @@ export class FloorWorld {
   }
 
   dispose() {
+    this.pool.dispose();
     for (const n of this.npcs.values()) n.dispose();
     this.npcs.clear();
     for (const d of this.disposables) { try { d.dispose(); } catch (e) { /* ignore */ } }
@@ -740,6 +823,7 @@ export class FloorWorld {
 }
 
 const _v = new THREE.Vector3();
+function byDist(a, b) { return a.dist - b.dist; }
 
 // Rescales a box's UVs so the texture tiles at a constant real-world size
 // regardless of how big the box is.

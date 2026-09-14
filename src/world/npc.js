@@ -347,26 +347,19 @@ export function createNpc(def, theme) {
     }
   }
 
-  // Every NPC carries a small personal light so they read against the dark.
-  const light = new THREE.PointLight(glowC, 8, 7.5, 2);
-  light.position.set(0, 1.5, 0);
-  g.add(light);
+  // Every NPC reads against the dark by way of a small personal light, but the
+  // light itself is owned by the floor's light pool rather than by this group —
+  // see lightpool.js. We only report where it should be and what colour.
 
   const label = makeLabel(def, glowC);
   label.position.y = form === 'tall' ? 3.0 : form === 'beast' || form === 'child' ? 1.65 : 2.35;
   g.add(label);
   owned.push(label.material.map, label.material);
 
-  const baseUpdate = update;
-  update = (t) => {
-    baseUpdate(t);
-    light.intensity = 8 + Math.sin(t * 1.6 + seed) * 1.1;
-  };
-
   return {
     group: g,
     label,
-    light,
+    glowColor: glowC,
     update,
     dispose() {
       for (const o of owned) { try { o.dispose(); } catch (e) { /* ignore */ } }
