@@ -99,11 +99,18 @@ export class FloorWorld {
       this.lightRoom(entry, placed);
 
       // props
+      const doorways = [];
+      for (const c of this.layout.corridors) {
+        for (const d of [c.doorA, c.doorB]) {
+          if (d.room === room.id) doorways.push({ x: d.x - placed.x, z: d.z - placed.z, side: d.side });
+        }
+      }
+
       const ctx = {
         room: placed, mats: this.mats, theme: this.theme,
         rng: makeRng(room.id + '|props'),
         lights: [], animated: [], disposables: this.disposables, colliders: [],
-        surface: null
+        doorways, surface: null
       };
       const props = buildProps(room.props, ctx);
       g.add(props);
@@ -187,13 +194,14 @@ export class FloorWorld {
   buildCorridors() {
     const W = CORRIDOR.width, H = CORRIDOR.height, half = W / 2;
 
+    // Pass one: work out every corridor's straight runs and corner junctions,
+    // and accumulate the union of all their walkable footprints. Two corridors
+    // are allowed to share a lane, so a wall may not be built anywhere another
+    // corridor actually walks — otherwise one route silently seals another.
+    const plans = [];
+    this.walkable = [];
     for (const c of this.layout.corridors) {
-      const g = new THREE.Group();
-      const entry = { group: g, lights: [], animated: [], colliders: [], corridor: c };
-      this.corridorGroups.set(c.key, entry);
-
       const p = c.points;
-      // straight runs, trimmed back at each corner, plus a junction box per turn
       const runs = [];
       for (let i = 0; i < p.length - 1; i++) {
         const a = { ...p[i] }, b = { ...p[i + 1] };
@@ -202,64 +210,77 @@ export class FloorWorld {
         if (i > 0) { if (horiz) a.x += dir * half; else a.z += dir * half; }
         if (i < p.length - 2) { if (horiz) b.x -= dir * half; else b.z -= dir * half; }
         if (horiz ? Math.abs(b.x - a.x) < 0.02 : Math.abs(b.z - a.z) < 0.02) continue;
-        runs.push({ a, b, horiz, dir });
+        const minX = Math.min(a.x, b.x), maxX = Math.max(a.x, b.x);
+        const minZ = Math.min(a.z, b.z), maxZ = Math.max(a.z, b.z);
+        const rect = horiz
+          ? { minX, maxX, minZ: minZ - half, maxZ: maxZ + half }
+          : { minX: minX - half, maxX: maxX + half, minZ, maxZ };
+        runs.push({ horiz, rect });
+        this.walkable.push(rect);
       }
+      const corners = [];
+      for (let i = 1; i < p.length - 1; i++) {
+        const cur = p[i];
+        corners.push({ cur, prev: p[i - 1], next: p[i + 1] });
+        this.walkable.push({
+          minX: cur.x - half, maxX: cur.x + half, minZ: cur.z - half, maxZ: cur.z + half
+        });
+      }
+      plans.push({ c, runs, corners });
+    }
 
-      for (const r of runs) {
-        const minX = Math.min(r.a.x, r.b.x), maxX = Math.max(r.a.x, r.b.x);
-        const minZ = Math.min(r.a.z, r.b.z), maxZ = Math.max(r.a.z, r.b.z);
-        const bx = r.horiz ? maxX - minX : W;
-        const bz = r.horiz ? W : maxZ - minZ;
-        const cxp = r.horiz ? (minX + maxX) / 2 : minX;
-        const czp = r.horiz ? minZ : (minZ + maxZ) / 2;
+    // Pass two: build.
+    for (const plan of plans) {
+      const c = plan.c;
+      const g = new THREE.Group();
+      const entry = { group: g, lights: [], animated: [], colliders: [], corridor: c };
+      this.corridorGroups.set(c.key, entry);
+      const p = c.points;
+
+      for (const r of plan.runs) {
+        const { minX, maxX, minZ, maxZ } = r.rect;
+        const cxp = r.horiz ? (minX + maxX) / 2 : (minX + maxX) / 2;
+        const czp = r.horiz ? (minZ + maxZ) / 2 : (minZ + maxZ) / 2;
+        const bx = maxX - minX, bz = maxZ - minZ;
 
         this.slab(g, cxp, -0.2, czp, bx, 0.4, bz, this.mats.floor);
         if (!this.theme.openSky) this.slab(g, cxp, H + 0.2, czp, bx, 0.4, bz, this.mats.ceiling);
 
-        // side walls
         if (r.horiz) {
-          for (const s of [-1, 1]) {
-            this.slab(g, cxp, H / 2, czp + s * (half + WALL_T / 2), bx, H, WALL_T, this.mats.wall, entry);
-          }
+          this.corridorWall(g, entry, 'x', minZ - WALL_T / 2, minX, maxX);
+          this.corridorWall(g, entry, 'x', maxZ + WALL_T / 2, minX, maxX);
         } else {
-          for (const s of [-1, 1]) {
-            this.slab(g, cxp + s * (half + WALL_T / 2), H / 2, czp, WALL_T, H, bz, this.mats.wall, entry);
-          }
+          this.corridorWall(g, entry, 'z', minX - WALL_T / 2, minZ, maxZ);
+          this.corridorWall(g, entry, 'z', maxX + WALL_T / 2, minZ, maxZ);
         }
       }
 
-      // corner junctions: floor, ceiling, and walls on the two closed sides
-      for (let i = 1; i < p.length - 1; i++) {
-        const prev = p[i - 1], cur = p[i], next = p[i + 1];
+      // corner junctions: floor, ceiling, and walls on the sides nothing uses
+      for (const k of plan.corners) {
+        const cur = k.cur;
         this.slab(g, cur.x, -0.2, cur.z, W, 0.4, W, this.mats.floor);
         if (!this.theme.openSky) this.slab(g, cur.x, H + 0.2, cur.z, W, 0.4, W, this.mats.ceiling);
         const open = new Set();
-        for (const o of [prev, next]) {
+        for (const o of [k.prev, k.next]) {
           const dx = o.x - cur.x, dz = o.z - cur.z;
           open.add(Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? 'e' : 'w') : (dz > 0 ? 's' : 'n'));
         }
-        const sides = {
-          n: [cur.x, cur.z - half - WALL_T / 2, W + WALL_T * 2, WALL_T],
-          s: [cur.x, cur.z + half + WALL_T / 2, W + WALL_T * 2, WALL_T],
-          w: [cur.x - half - WALL_T / 2, cur.z, WALL_T, W + WALL_T * 2],
-          e: [cur.x + half + WALL_T / 2, cur.z, WALL_T, W + WALL_T * 2]
-        };
-        for (const [k, v] of Object.entries(sides)) {
-          if (open.has(k)) continue;
-          this.slab(g, v[0], H / 2, v[1], v[2], H, v[3], this.mats.wall, entry);
-        }
+        if (!open.has('n')) this.corridorWall(g, entry, 'x', cur.z - half - WALL_T / 2, cur.x - half - WALL_T, cur.x + half + WALL_T);
+        if (!open.has('s')) this.corridorWall(g, entry, 'x', cur.z + half + WALL_T / 2, cur.x - half - WALL_T, cur.x + half + WALL_T);
+        if (!open.has('w')) this.corridorWall(g, entry, 'z', cur.x - half - WALL_T / 2, cur.z - half - WALL_T, cur.z + half + WALL_T);
+        if (!open.has('e')) this.corridorWall(g, entry, 'z', cur.x + half + WALL_T / 2, cur.z - half - WALL_T, cur.z + half + WALL_T);
       }
 
       // corridor lighting: a sconce every few metres
       const len = corridorLength(p);
-      const lampEvery = 11;
+      const lampEvery = 8.5;
       const n = Math.max(1, Math.round(len / lampEvery));
       for (let i = 0; i < n; i++) {
         const pt = pointAlong(p, ((i + 0.5) / n) * len);
-        const l = new THREE.PointLight(this.theme.lightPlan.color, 1.9 * LIGHT_SCALE, 12, 2);
+        const l = new THREE.PointLight(this.theme.lightPlan.color, 2.4 * LIGHT_SCALE, 13, 2);
         l.position.set(pt.x, H * 0.72, pt.z);
         g.add(l);
-        const rec = { light: l, flicker: this.theme.lightPlan.flicker * 0.7, base: 1.9 * LIGHT_SCALE };
+        const rec = { light: l, flicker: this.theme.lightPlan.flicker * 0.7, base: 2.4 * LIGHT_SCALE };
         entry.lights.push(rec);
         this.allLights.push(rec);
         const bulb = new THREE.Mesh(
@@ -281,6 +302,45 @@ export class FloorWorld {
       });
 
       this.root.add(g);
+    }
+  }
+
+  // A corridor wall along `axis` at `fixed`, spanning `from`..`to`, with any
+  // stretch that another corridor walks through cut out of it. Where two routes
+  // cross, this leaves an opening in both — which is what a crossing is.
+  corridorWall(group, entry, axis, fixed, from, to) {
+    const H = CORRIDOR.height;
+    const t = WALL_T / 2;
+    const box = axis === 'x'
+      ? { minX: from, maxX: to, minZ: fixed - t, maxZ: fixed + t }
+      : { minX: fixed - t, maxX: fixed + t, minZ: from, maxZ: to };
+
+    const blocked = [];
+    for (const f of this.walkable) {
+      const ox = Math.min(box.maxX, f.maxX) - Math.max(box.minX, f.minX);
+      const oz = Math.min(box.maxZ, f.maxZ) - Math.max(box.minZ, f.minZ);
+      if (ox <= 0.08 || oz <= 0.08) continue;
+      blocked.push(axis === 'x'
+        ? [Math.max(from, f.minX - 0.3), Math.min(to, f.maxX + 0.3)]
+        : [Math.max(from, f.minZ - 0.3), Math.min(to, f.maxZ + 0.3)]);
+    }
+
+    blocked.sort((a, b) => a[0] - b[0]);
+    const pieces = [];
+    let cursor = from;
+    for (const [s, e] of blocked) {
+      if (s > cursor) pieces.push([cursor, s]);
+      cursor = Math.max(cursor, e);
+    }
+    if (cursor < to) pieces.push([cursor, to]);
+
+    for (const [s, e] of pieces) {
+      if (e - s < 0.2) continue;
+      const cx = axis === 'x' ? (s + e) / 2 : fixed;
+      const cz = axis === 'x' ? fixed : (s + e) / 2;
+      const sx = axis === 'x' ? e - s : WALL_T;
+      const sz = axis === 'x' ? WALL_T : e - s;
+      this.slab(group, cx, H / 2, cz, sx, H, sz, this.mats.wall, entry);
     }
   }
 
@@ -522,6 +582,32 @@ export class FloorWorld {
     if (tryAxis(x + delta.x, z)) x += delta.x;
     if (tryAxis(x, z + delta.z)) z += delta.z;
     return { x, z };
+  }
+
+  // Somewhere in this room the player can actually stand. Starts from the
+  // preferred spot and spirals outward if a prop happens to occupy it.
+  spawnPoint(roomId) {
+    const p = this.layout.rooms.get(roomId);
+    if (!p) return null;
+    const clear = (x, z) => {
+      for (const c of this.colliders) {
+        if (x + PLAYER_R > c.minX && x - PLAYER_R < c.maxX &&
+            z + PLAYER_R > c.minZ && z - PLAYER_R < c.maxZ) return false;
+      }
+      return true;
+    };
+    const prefer = { x: p.x, z: p.z + p.d * 0.30 };
+    if (clear(prefer.x, prefer.z)) return prefer;
+    for (let r = 1.2; r < Math.max(p.w, p.d) * 0.5; r += 1.2) {
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * Math.PI * 2;
+        const x = prefer.x + Math.cos(a) * r;
+        const z = prefer.z + Math.sin(a) * r;
+        if (Math.abs(x - p.x) > p.w / 2 - 1 || Math.abs(z - p.z) > p.d / 2 - 1) continue;
+        if (clear(x, z)) return { x, z };
+      }
+    }
+    return { x: p.x, z: p.z };
   }
 
   roomAt(x, z) {

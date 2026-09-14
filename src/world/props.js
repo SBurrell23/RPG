@@ -31,14 +31,38 @@ export function disposeSharedGeometry() {
   for (const k of Object.keys(GEO)) delete GEO[k];
 }
 
+// True if a point sits in the walking approach to one of the room's doorways.
+// ctx.doorways holds room-local door positions; the approach is a lane reaching
+// APPROACH metres in from the wall and HALF_LANE either side of the door centre.
+const APPROACH = 5.2;
+const HALF_LANE = 2.9;
+
+function blocksDoor(ctx, x, z, pad = 0) {
+  for (const d of ctx.doorways || []) {
+    let along, lateral;
+    if (d.side === 'north') { along = z - d.z; lateral = x - d.x; }
+    else if (d.side === 'south') { along = d.z - z; lateral = x - d.x; }
+    else if (d.side === 'west') { along = x - d.x; lateral = z - d.z; }
+    else { along = d.x - x; lateral = z - d.z; }
+    if (along > -1.2 && along < APPROACH + pad && Math.abs(lateral) < HALF_LANE + pad) return true;
+  }
+  return false;
+}
+
 // Keeps props out of the middle of the room (where the NPC and the player stand)
-// and away from the walls where doorways are cut.
+// and out of the doorways. If the slot the ring wants is in front of a door it
+// steps around the room until it finds one that isn't.
 function ring(ctx, i, n, radiusFrac = 0.78, jitter = 0.1) {
   const { room, rng } = ctx;
-  const a = (i / n) * Math.PI * 2 + rng() * jitter;
+  const base = (i / n) * Math.PI * 2 + rng() * jitter;
   const rx = (room.w / 2) * radiusFrac;
   const rz = (room.d / 2) * radiusFrac;
-  return { x: Math.cos(a) * rx, z: Math.sin(a) * rz, a };
+  for (let k = 0; k < 14; k++) {
+    const a = base + k * 0.42;
+    const x = Math.cos(a) * rx, z = Math.sin(a) * rz;
+    if (!blocksDoor(ctx, x, z)) return { x, z, a };
+  }
+  return { x: Math.cos(base) * rx, z: Math.sin(base) * rz, a: base };
 }
 
 function corner(ctx, i, inset = 2.4) {
@@ -62,8 +86,10 @@ function addLight(ctx, color, intensity, distance, x, y, z, flicker = 0) {
 function anim(ctx, fn) { ctx.animated.push(fn); }
 
 // Registers a room-local AABB the player can't walk through. The builder offsets
-// these into world space.
+// these into world space. A prop that would stand across a doorway is left
+// visible but made non-solid rather than sealing the room.
 function solid(ctx, x, z, halfW, halfD) {
+  if (blocksDoor(ctx, x, z, Math.max(halfW, halfD))) return;
   ctx.colliders.push({ minX: x - halfW, maxX: x + halfW, minZ: z - halfD, maxZ: z + halfD });
 }
 
@@ -180,6 +206,7 @@ const PROPS = {
       for (let i = 0; i < count; i++) {
         const z = -room.d / 2 + 3 + i * (room.d - 6) / Math.max(1, count - 1);
         const x = side * (room.w / 2 - 0.85);
+        if (blocksDoor(ctx, x, z, 2.2)) continue;
         const frame = new THREE.Mesh(geo('shelfFrame', () => new THREE.BoxGeometry(1.1, 1, 4.2)), mats.wood);
         frame.scale.y = h;
         frame.position.set(x, h / 2, z);

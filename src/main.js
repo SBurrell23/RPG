@@ -184,9 +184,10 @@ class Game {
   placeInRoom(roomId, initial = false) {
     const placed = this.world.layout.rooms.get(roomId);
     if (!placed) return;
-    // stand just inside the room, facing its centre (camera forward is -Z at yaw 0)
-    const z = placed.z + placed.d * 0.30;
-    this.player.setPosition(placed.x, z, 0);
+    // stand just inside the room facing its centre (camera forward is -Z at yaw 0),
+    // nudged clear of anything a prop happens to be occupying
+    const spot = this.world.spawnPoint(roomId) || { x: placed.x, z: placed.z + placed.d * 0.30 };
+    this.player.setPosition(spot.x, spot.z, 0);
     this.onRoomEnter(roomId, initial);
   }
 
