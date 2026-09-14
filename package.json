@@ -1,0 +1,11 @@
+{
+  "name": "verrow",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The Verrow — a first-person, no-combat dungeon RPG built on three.js with no asset files.",
+  "scripts": {
+    "validate": "node tools/validate.mjs",
+    "serve": "node tools/serve.mjs"
+  }
+}

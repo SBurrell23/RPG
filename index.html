@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>The Verrow</title>
+<meta name="description" content="A first-person dungeon with no combat in it. Ten floors, ten questions, three heartbeats of grace.">
+<meta name="theme-color" content="#07090d">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%238fe0ff' d='M12 1.5 21 7v10l-9 5.5L3 17V7l9-5.5Zm0 2.6L5 8.2v7.6l7 4.1 7-4.1V8.2l-7-4.1Z'/></svg>">
+<link rel="stylesheet" href="styles.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/build/three.module.js",
+    "three/addons/": "./vendor/three/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div id="ui"></div>
+
+  <div id="loading" class="loading show">
+    <div class="loading-inner">
+      <div class="loading-mark"></div>
+      <pre class="loading-text">Opening the plinth&hellip;</pre>
+    </div>
+  </div>
+
+  <noscript>
+    <div class="noscript">The Verrow is a WebGL game and needs JavaScript enabled.</div>
+  </noscript>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

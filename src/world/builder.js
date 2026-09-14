@@ -1,0 +1,688 @@
+// Assembles a floor: room shells with doorways cut where corridors meet them,
+// corridors with proper corner junctions, doors, the lighting rig, props, NPCs,
+// and the collision set. One instance per floor; dispose() puts it all back.
+
+import * as THREE from 'three';
+import { buildLayout, CORRIDOR, DOORWAY } from './layout.js';
+import { MaterialSet } from './materials.js';
+import { buildProps, makeRng } from './props.js';
+import { createNpc } from './npc.js';
+import { KIND_ACCENTS } from '../data/themes.js';
+import * as Settings from '../engine/settings.js';
+import { pointSprite } from '../engine/textures.js';
+
+const WALL_T = 0.5;
+const PLAYER_R = 0.42;
+
+// three.js uses physical light units (candela) by default since r155, so the
+// intensities the themes express in "how bright should this feel" terms are
+// scaled up into something a point light with quadratic decay can actually do.
+const LIGHT_SCALE = 8;
+
+export class FloorWorld {
+  constructor(floor, theme, scene) {
+    this.floor = floor;
+    this.theme = theme;
+    this.scene = scene;
+    this.layout = buildLayout(floor);
+    this.mats = new MaterialSet(theme);
+
+    this.root = new THREE.Group();
+    this.root.name = 'floor-' + floor.id;
+    scene.add(this.root);
+
+    this.roomGroups = new Map();      // roomId -> { group, lights, animated, npc, colliders }
+    this.corridorGroups = new Map();  // key    -> { group, lights, animated, colliders, door meshes }
+    this.doors = new Map();           // key    -> { locked, meshes[], colliders[], opened }
+    this.colliders = [];              // active AABBs
+    this.animated = [];
+    this.allLights = [];
+    this.npcs = new Map();
+    this.disposables = [];
+    this.surfaceByRoom = new Map();
+
+    this.buildRooms();
+    this.buildCorridors();
+    this.buildAtmosphere();
+    this.rebuildColliders();
+  }
+
+  // ------------------------------------------------------------------ rooms
+
+  buildRooms() {
+    for (const placed of this.layout.rooms.values()) {
+      const room = placed.room;
+      const g = new THREE.Group();
+      g.position.set(placed.x, 0, placed.z);
+      const entry = { group: g, lights: [], animated: [], colliders: [], placed, npc: null };
+      this.roomGroups.set(room.id, entry);
+
+      const openSky = !!this.theme.openSky;
+
+      // floor slab
+      const fl = new THREE.Mesh(
+        tileUv(new THREE.BoxGeometry(placed.w, 0.4, placed.d), this.mats.floor, placed.w, placed.d),
+        this.mats.floor);
+      fl.position.y = -0.2;
+      fl.receiveShadow = true;
+      g.add(fl);
+      this.disposables.push(fl.geometry);
+
+      // ceiling
+      if (!openSky) {
+        const cl = new THREE.Mesh(
+          tileUv(new THREE.BoxGeometry(placed.w, 0.4, placed.d), this.mats.ceiling, placed.w, placed.d),
+          this.mats.ceiling);
+        cl.position.y = placed.h + 0.2;
+        cl.receiveShadow = true;
+        g.add(cl);
+        this.disposables.push(cl.geometry);
+      }
+
+      // walls, with a gap wherever a corridor arrives
+      const gaps = { north: [], south: [], east: [], west: [] };
+      for (const c of this.layout.corridors) {
+        for (const d of [c.doorA, c.doorB]) {
+          if (d.room !== room.id) continue;
+          const along = (d.side === 'north' || d.side === 'south') ? d.x - placed.x : d.z - placed.z;
+          gaps[d.side].push(along);
+        }
+      }
+
+      const hw = placed.w / 2, hd = placed.d / 2;
+      this.wallRun(g, entry, 'x', -hd - WALL_T / 2, -hw, hw, placed.h, gaps.north, placed.w);
+      this.wallRun(g, entry, 'x', hd + WALL_T / 2, -hw, hw, placed.h, gaps.south, placed.w);
+      this.wallRun(g, entry, 'z', -hw - WALL_T / 2, -hd, hd, placed.h, gaps.west, placed.d);
+      this.wallRun(g, entry, 'z', hw + WALL_T / 2, -hd, hd, placed.h, gaps.east, placed.d);
+
+      // lighting rig
+      this.lightRoom(entry, placed);
+
+      // props
+      const ctx = {
+        room: placed, mats: this.mats, theme: this.theme,
+        rng: makeRng(room.id + '|props'),
+        lights: [], animated: [], disposables: this.disposables, colliders: [],
+        surface: null
+      };
+      const props = buildProps(room.props, ctx);
+      g.add(props);
+      for (const l of ctx.lights) { entry.lights.push(l); this.allLights.push(l); }
+      for (const a of ctx.animated) entry.animated.push(a);
+      for (const c of ctx.colliders) {
+        entry.colliders.push({
+          minX: placed.x + c.minX, maxX: placed.x + c.maxX,
+          minZ: placed.z + c.minZ, maxZ: placed.z + c.maxZ
+        });
+      }
+      this.surfaceByRoom.set(room.id, ctx.surface || this.defaultSurface());
+
+      // NPC
+      if (room.npc) {
+        const npc = createNpc(room.npc, this.theme);
+        npc.group.position.set(0, 0, -placed.d * 0.16);
+        npc.group.rotation.y = Math.PI;
+        g.add(npc.group);
+        entry.npc = npc;
+        this.npcs.set(room.id, npc);
+        entry.animated.push(npc.update);
+        const key = new THREE.PointLight(this.theme.accent2, 1.5 * LIGHT_SCALE, 9, 2);
+        key.position.set(1.6, 2.6, -placed.d * 0.16 + 1.8);
+        const keyRec = { light: key, flicker: 0, base: 1.5 * LIGHT_SCALE };
+        entry.lights.push(keyRec);
+        this.allLights.push(keyRec);
+        g.add(key);
+      }
+
+      this.root.add(g);
+    }
+  }
+
+  // Builds one side of a room: solid pieces between the doorway gaps, plus lintels.
+  wallRun(group, entry, axis, fixed, from, to, height, gaps, span) {
+    const half = DOORWAY.width / 2;
+    const sorted = gaps.slice().sort((a, b) => a - b);
+    const pieces = [];
+    let cursor = from;
+    for (const gpos of sorted) {
+      const a = Math.max(from, gpos - half);
+      const b = Math.min(to, gpos + half);
+      if (a > cursor) pieces.push([cursor, a]);
+      cursor = Math.max(cursor, b);
+      // lintel above the doorway
+      if (height > DOORWAY.height + 0.05) {
+        this.wallBox(group, entry, axis, fixed, a, b, DOORWAY.height, height, false);
+      }
+    }
+    if (cursor < to) pieces.push([cursor, to]);
+    for (const [a, b] of pieces) this.wallBox(group, entry, axis, fixed, a, b, 0, height, true);
+  }
+
+  wallBox(group, entry, axis, fixed, a, b, y0, y1, solid) {
+    const len = b - a;
+    if (len <= 0.01) return;
+    const h = y1 - y0;
+    const geom = tileUv(
+      axis === 'x' ? new THREE.BoxGeometry(len, h, WALL_T) : new THREE.BoxGeometry(WALL_T, h, len),
+      this.mats.wall, len, h);
+    const m = new THREE.Mesh(geom, this.mats.wall);
+    const mid = (a + b) / 2;
+    if (axis === 'x') m.position.set(mid, y0 + h / 2, fixed);
+    else m.position.set(fixed, y0 + h / 2, mid);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    group.add(m);
+    this.disposables.push(geom);
+    if (solid) {
+      const p = entry.placed;
+      const world = axis === 'x'
+        ? { minX: p.x + a, maxX: p.x + b, minZ: p.z + fixed - WALL_T / 2, maxZ: p.z + fixed + WALL_T / 2 }
+        : { minX: p.x + fixed - WALL_T / 2, maxX: p.x + fixed + WALL_T / 2, minZ: p.z + a, maxZ: p.z + b };
+      entry.colliders.push(world);
+    }
+  }
+
+  // -------------------------------------------------------------- corridors
+
+  buildCorridors() {
+    const W = CORRIDOR.width, H = CORRIDOR.height, half = W / 2;
+
+    for (const c of this.layout.corridors) {
+      const g = new THREE.Group();
+      const entry = { group: g, lights: [], animated: [], colliders: [], corridor: c };
+      this.corridorGroups.set(c.key, entry);
+
+      const p = c.points;
+      // straight runs, trimmed back at each corner, plus a junction box per turn
+      const runs = [];
+      for (let i = 0; i < p.length - 1; i++) {
+        const a = { ...p[i] }, b = { ...p[i + 1] };
+        const horiz = Math.abs(b.x - a.x) > Math.abs(b.z - a.z);
+        const dir = horiz ? Math.sign(b.x - a.x) : Math.sign(b.z - a.z);
+        if (i > 0) { if (horiz) a.x += dir * half; else a.z += dir * half; }
+        if (i < p.length - 2) { if (horiz) b.x -= dir * half; else b.z -= dir * half; }
+        if (horiz ? Math.abs(b.x - a.x) < 0.02 : Math.abs(b.z - a.z) < 0.02) continue;
+        runs.push({ a, b, horiz, dir });
+      }
+
+      for (const r of runs) {
+        const minX = Math.min(r.a.x, r.b.x), maxX = Math.max(r.a.x, r.b.x);
+        const minZ = Math.min(r.a.z, r.b.z), maxZ = Math.max(r.a.z, r.b.z);
+        const bx = r.horiz ? maxX - minX : W;
+        const bz = r.horiz ? W : maxZ - minZ;
+        const cxp = r.horiz ? (minX + maxX) / 2 : minX;
+        const czp = r.horiz ? minZ : (minZ + maxZ) / 2;
+
+        this.slab(g, cxp, -0.2, czp, bx, 0.4, bz, this.mats.floor);
+        if (!this.theme.openSky) this.slab(g, cxp, H + 0.2, czp, bx, 0.4, bz, this.mats.ceiling);
+
+        // side walls
+        if (r.horiz) {
+          for (const s of [-1, 1]) {
+            this.slab(g, cxp, H / 2, czp + s * (half + WALL_T / 2), bx, H, WALL_T, this.mats.wall, entry);
+          }
+        } else {
+          for (const s of [-1, 1]) {
+            this.slab(g, cxp + s * (half + WALL_T / 2), H / 2, czp, WALL_T, H, bz, this.mats.wall, entry);
+          }
+        }
+      }
+
+      // corner junctions: floor, ceiling, and walls on the two closed sides
+      for (let i = 1; i < p.length - 1; i++) {
+        const prev = p[i - 1], cur = p[i], next = p[i + 1];
+        this.slab(g, cur.x, -0.2, cur.z, W, 0.4, W, this.mats.floor);
+        if (!this.theme.openSky) this.slab(g, cur.x, H + 0.2, cur.z, W, 0.4, W, this.mats.ceiling);
+        const open = new Set();
+        for (const o of [prev, next]) {
+          const dx = o.x - cur.x, dz = o.z - cur.z;
+          open.add(Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? 'e' : 'w') : (dz > 0 ? 's' : 'n'));
+        }
+        const sides = {
+          n: [cur.x, cur.z - half - WALL_T / 2, W + WALL_T * 2, WALL_T],
+          s: [cur.x, cur.z + half + WALL_T / 2, W + WALL_T * 2, WALL_T],
+          w: [cur.x - half - WALL_T / 2, cur.z, WALL_T, W + WALL_T * 2],
+          e: [cur.x + half + WALL_T / 2, cur.z, WALL_T, W + WALL_T * 2]
+        };
+        for (const [k, v] of Object.entries(sides)) {
+          if (open.has(k)) continue;
+          this.slab(g, v[0], H / 2, v[1], v[2], H, v[3], this.mats.wall, entry);
+        }
+      }
+
+      // corridor lighting: a sconce every few metres
+      const len = corridorLength(p);
+      const lampEvery = 11;
+      const n = Math.max(1, Math.round(len / lampEvery));
+      for (let i = 0; i < n; i++) {
+        const pt = pointAlong(p, ((i + 0.5) / n) * len);
+        const l = new THREE.PointLight(this.theme.lightPlan.color, 1.9 * LIGHT_SCALE, 12, 2);
+        l.position.set(pt.x, H * 0.72, pt.z);
+        g.add(l);
+        const rec = { light: l, flicker: this.theme.lightPlan.flicker * 0.7, base: 1.9 * LIGHT_SCALE };
+        entry.lights.push(rec);
+        this.allLights.push(rec);
+        const bulb = new THREE.Mesh(
+          new THREE.SphereGeometry(0.1, 7, 6),
+          this.mats.flame
+        );
+        bulb.position.copy(l.position);
+        g.add(bulb);
+        this.disposables.push(bulb.geometry);
+      }
+
+      // doors at both ends
+      this.makeDoor(g, entry, c, c.doorA);
+      this.makeDoor(g, entry, c, c.doorB);
+
+      this.doors.set(c.key, {
+        locked: c.locked, secret: c.secret, key: c.key, a: c.a, b: c.b,
+        label: c.label, panels: entry.panels || [], opened: !c.locked
+      });
+
+      this.root.add(g);
+    }
+  }
+
+  slab(group, x, y, z, sx, sy, sz, mat, colliderEntry) {
+    const w = Math.max(0.01, sx), hgt = Math.max(0.01, sy), dep = Math.max(0.01, sz);
+    const geom = tileUv(new THREE.BoxGeometry(w, hgt, dep), mat,
+      Math.max(w, dep), hgt > 1 ? hgt : Math.min(w, dep));
+    const m = new THREE.Mesh(geom, mat);
+    m.position.set(x, y, z);
+    m.castShadow = sy > 1;
+    m.receiveShadow = true;
+    group.add(m);
+    this.disposables.push(geom);
+    if (colliderEntry) {
+      colliderEntry.colliders.push({
+        minX: x - sx / 2, maxX: x + sx / 2, minZ: z - sz / 2, maxZ: z + sz / 2
+      });
+    }
+    return m;
+  }
+
+  makeDoor(group, entry, corridor, door) {
+    const w = DOORWAY.width, h = DOORWAY.height;
+    const vertical = door.side === 'east' || door.side === 'west';
+    const panelGeo = new THREE.BoxGeometry(vertical ? 0.28 : w - 0.12, h - 0.1, vertical ? w - 0.12 : 0.28);
+    const panel = new THREE.Mesh(panelGeo, corridor.locked ? this.mats.doorLocked : this.mats.doorMat);
+    panel.position.set(door.x, (h - 0.1) / 2, door.z);
+    panel.castShadow = panel.receiveShadow = true;
+    group.add(panel);
+    this.disposables.push(panelGeo);
+
+    // frame
+    const frameMat = this.mats.trim;
+    const fT = 0.22;
+    if (vertical) {
+      this.slab(group, door.x, h / 2, door.z - w / 2 - fT / 2, 0.6, h + fT, fT, frameMat);
+      this.slab(group, door.x, h / 2, door.z + w / 2 + fT / 2, 0.6, h + fT, fT, frameMat);
+      this.slab(group, door.x, h + fT / 2, door.z, 0.6, fT, w + fT * 2, frameMat);
+    } else {
+      this.slab(group, door.x - w / 2 - fT / 2, h / 2, door.z, fT, h + fT, 0.6, frameMat);
+      this.slab(group, door.x + w / 2 + fT / 2, h / 2, door.z, fT, h + fT, 0.6, frameMat);
+      this.slab(group, door.x, h + fT / 2, door.z, w + fT * 2, fT, 0.6, frameMat);
+    }
+
+    entry.panels = entry.panels || [];
+    entry.panels.push({
+      mesh: panel, side: door.side, closedY: (h - 0.1) / 2, openY: (h - 0.1) / 2 + h + 0.2,
+      collider: {
+        minX: door.x - (vertical ? 0.2 : w / 2), maxX: door.x + (vertical ? 0.2 : w / 2),
+        minZ: door.z - (vertical ? w / 2 : 0.2), maxZ: door.z + (vertical ? w / 2 : 0.2)
+      }
+    });
+
+    if (corridor.secret && corridor.locked) {
+      panel.material = this.mats.wall;
+    }
+  }
+
+  // ------------------------------------------------------------- lighting
+
+  lightRoom(entry, placed) {
+    const plan = this.theme.lightPlan;
+    const kind = KIND_ACCENTS[placed.room.kind];
+
+    if (plan.style !== 'none') {
+      const n = placed.w > 28 ? 6 : placed.w > 20 ? 4 : placed.w > 13 ? 3 : 2;
+      for (let i = 0; i < n; i++) {
+        const a = (i / n) * Math.PI * 2 + 0.4;
+        const rx = (placed.w / 2 - 1.6) * (plan.style === 'volume' ? 0.55 : 0.92);
+        const rz = (placed.d / 2 - 1.6) * (plan.style === 'volume' ? 0.55 : 0.92);
+        const y = plan.style === 'pendant' ? Math.min(plan.height, placed.h - 1.0)
+          : plan.style === 'floor' ? plan.height
+          : plan.style === 'volume' ? Math.min(plan.height, placed.h * 0.4)
+          : plan.height;
+        const l = new THREE.PointLight(plan.color, plan.intensity * LIGHT_SCALE, plan.distance, 2);
+        l.position.set(Math.cos(a) * rx, y, Math.sin(a) * rz);
+        entry.group.add(l);
+        const rec = { light: l, flicker: plan.flicker, base: plan.intensity * LIGHT_SCALE };
+        entry.lights.push(rec);
+        this.allLights.push(rec);
+
+        // the fitting itself, so the light has a visible source
+        const fitting = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 6), this.mats.flame);
+        fitting.position.copy(l.position);
+        entry.group.add(fitting);
+        this.disposables.push(fitting.geometry);
+      }
+    }
+
+    // cool bounce fill so shadows aren't pure black
+    if (plan.fill && plan.fill.intensity > 0) {
+      const fill = new THREE.PointLight(plan.fill.color, plan.fill.intensity * LIGHT_SCALE * 1.1, placed.w * 1.25, 2);
+      fill.position.set(0, placed.h * 0.62, 0);
+      entry.group.add(fill);
+      const rec = { light: fill, flicker: 0, base: plan.fill.intensity * LIGHT_SCALE * 1.1, fill: true };
+      entry.lights.push(rec);
+      this.allLights.push(rec);
+    }
+
+    if (kind && kind.intensity > 0) {
+      const l = new THREE.PointLight(kind.color, kind.intensity * LIGHT_SCALE, placed.w * 1.1, 2);
+      l.position.set(0, kind.height, 0);
+      entry.group.add(l);
+      const rec = { light: l, flicker: placed.room.kind === 'deadend' ? 0.3 : 0.05, base: kind.intensity * LIGHT_SCALE };
+      entry.lights.push(rec);
+      this.allLights.push(rec);
+    }
+  }
+
+  // ------------------------------------------------------------ atmosphere
+
+  buildAtmosphere() {
+    const spec = this.theme.particles;
+    const scale = Settings.particleScale();
+    if (!spec || scale <= 0) { this.particles = null; return; }
+    const n = Math.max(20, Math.round(spec.count * scale));
+    const R = 34;
+    const pos = new Float32Array(n * 3);
+    const vel = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      pos[i * 3] = (Math.random() - 0.5) * R;
+      pos[i * 3 + 1] = Math.random() * 12;
+      pos[i * 3 + 2] = (Math.random() - 0.5) * R;
+      vel[i] = 0.5 + Math.random();
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({
+      color: spec.color, size: spec.size * (spec.kind === 'rain' ? 1.6 : 2.4), transparent: true,
+      opacity: spec.kind === 'rain' ? 0.55 : 0.75,
+      map: pointSprite(), alphaTest: 0.02,
+      depthWrite: false, sizeAttenuation: true,
+      blending: spec.kind === 'rain' ? THREE.NormalBlending : THREE.AdditiveBlending
+    });
+    const pts = new THREE.Points(geom, mat);
+    pts.frustumCulled = false;
+    this.scene.add(pts);
+    this.particles = { pts, geom, mat, n, vel, kind: spec.kind, drift: spec.drift, R };
+    this.disposables.push(geom, mat);
+
+    if (this.theme.lightning) {
+      this.bolt = new THREE.DirectionalLight(0xdce8ff, 0);
+      this.bolt.position.set(24, 60, -18);
+      this.scene.add(this.bolt);
+      this.nextBolt = 4 + Math.random() * 8;
+    }
+  }
+
+  updateParticles(dt, camPos) {
+    const p = this.particles;
+    if (!p) return;
+    const a = p.geom.attributes.position.array;
+    const R = p.R, half = R / 2;
+    for (let i = 0; i < p.n; i++) {
+      const ix = i * 3;
+      if (p.kind === 'rain') {
+        a[ix + 1] -= p.vel[i] * 26 * dt;
+        if (a[ix + 1] < -2) {
+          a[ix + 1] = 16;
+          a[ix] = camPos.x + (Math.random() - 0.5) * R;
+          a[ix + 2] = camPos.z + (Math.random() - 0.5) * R;
+        }
+      } else {
+        a[ix + 1] += p.drift * p.vel[i] * dt * 4;
+        a[ix] += Math.sin(a[ix + 2] * 0.2 + performance.now() * 0.0002) * dt * 0.3;
+        if (a[ix + 1] > 13) a[ix + 1] = 0.2;
+        if (a[ix + 1] < 0) a[ix + 1] = 12.8;
+      }
+      // keep the cloud centred on the player
+      if (a[ix] - camPos.x > half) a[ix] -= R;
+      if (a[ix] - camPos.x < -half) a[ix] += R;
+      if (a[ix + 2] - camPos.z > half) a[ix + 2] -= R;
+      if (a[ix + 2] - camPos.z < -half) a[ix + 2] += R;
+    }
+    p.geom.attributes.position.needsUpdate = true;
+  }
+
+  // -------------------------------------------------------------- doors
+
+  setLocked(roomIdTo, locked) {
+    let changed = false;
+    for (const d of this.doors.values()) {
+      if (d.b !== roomIdTo && d.a !== roomIdTo) continue;
+      // only the door *leading into* that room, as authored
+      if (d.b !== roomIdTo) continue;
+      if (d.locked === locked) continue;
+      d.locked = locked;
+      changed = true;
+    }
+    if (changed) this.rebuildColliders();
+    return changed;
+  }
+
+  isOpen(key) {
+    const d = this.doors.get(key);
+    return d ? !d.locked : false;
+  }
+
+  updateDoors(dt) {
+    for (const [key, d] of this.doors) {
+      const entry = this.corridorGroups.get(key);
+      if (!entry || !entry.panels) continue;
+      const want = d.locked ? 0 : 1;
+      d.anim = d.anim === undefined ? want : d.anim;
+      const before = d.anim;
+      d.anim += (want - d.anim) * Math.min(1, dt * 2.4);
+      if (Math.abs(want - d.anim) < 0.002) d.anim = want;
+      if (Math.abs(before - d.anim) > 0.0005) {
+        for (const p of entry.panels) {
+          p.mesh.position.y = p.closedY + (p.openY - p.closedY) * d.anim;
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------- collision
+
+  rebuildColliders() {
+    const out = [];
+    for (const e of this.roomGroups.values()) out.push(...e.colliders);
+    for (const [key, e] of this.corridorGroups) {
+      out.push(...e.colliders);
+      const d = this.doors.get(key);
+      if (d && d.locked && e.panels) for (const p of e.panels) out.push(p.collider);
+    }
+    this.colliders = out;
+  }
+
+  // Slide-along-walls resolution against the AABB set.
+  resolveMove(from, delta) {
+    const r = PLAYER_R;
+    let x = from.x, z = from.z;
+    const tryAxis = (nx, nz) => {
+      for (const c of this.colliders) {
+        if (nx + r > c.minX && nx - r < c.maxX && nz + r > c.minZ && nz - r < c.maxZ) return false;
+      }
+      return true;
+    };
+    if (tryAxis(x + delta.x, z)) x += delta.x;
+    if (tryAxis(x, z + delta.z)) z += delta.z;
+    return { x, z };
+  }
+
+  roomAt(x, z) {
+    for (const p of this.layout.rooms.values()) {
+      if (x > p.x - p.w / 2 && x < p.x + p.w / 2 && z > p.z - p.d / 2 && z < p.z + p.d / 2) return p.room.id;
+    }
+    return null;
+  }
+
+  defaultSurface() {
+    return { salt: 'stone', warren: 'dirt', archive: 'water', foundry: 'metal', garden: 'dirt',
+      clockwork: 'metal', choir: 'stone', ossuary: 'bone', storm: 'water', cadence: 'stone'
+    }[this.theme.key] || 'stone';
+  }
+
+  // ------------------------------------------------------------ visibility
+
+  setVisibleFrom(roomId) {
+    if (this._visFrom === roomId) return;
+    this._visFrom = roomId;
+    const show = new Set();
+    const showCorr = new Set();
+    if (roomId) {
+      show.add(roomId);
+      for (const c of this.layout.corridors) {
+        if (c.a !== roomId && c.b !== roomId) continue;
+        showCorr.add(c.key);
+        show.add(c.a); show.add(c.b);
+      }
+      // one more hop of corridors so doorways in neighbouring rooms aren't voids
+      for (const c of this.layout.corridors) {
+        if (show.has(c.a) || show.has(c.b)) showCorr.add(c.key);
+      }
+    } else {
+      for (const id of this.roomGroups.keys()) show.add(id);
+      for (const k of this.corridorGroups.keys()) showCorr.add(k);
+    }
+    for (const [id, e] of this.roomGroups) e.group.visible = show.has(id);
+    for (const [k, e] of this.corridorGroups) e.group.visible = showCorr.has(k);
+    this.visibleRooms = show;
+    this.visibleCorridors = showCorr;
+  }
+
+  // Keeps the active light count inside the user's budget, nearest-first.
+  updateLights(camPos, t, dt) {
+    const budget = Settings.maxDynamicLights();
+    const shadowBudget = Settings.maxShadowLights();
+    const candidates = [];
+
+    for (const [id, e] of this.roomGroups) {
+      const on = !this.visibleRooms || this.visibleRooms.has(id);
+      for (const rec of e.lights) {
+        if (!on) { rec.light.visible = false; continue; }
+        rec.dist = rec.light.getWorldPosition(_v).distanceToSquared(camPos);
+        candidates.push(rec);
+      }
+    }
+    for (const [k, e] of this.corridorGroups) {
+      const on = !this.visibleCorridors || this.visibleCorridors.has(k);
+      for (const rec of e.lights) {
+        if (!on) { rec.light.visible = false; continue; }
+        rec.dist = rec.light.getWorldPosition(_v).distanceToSquared(camPos);
+        candidates.push(rec);
+      }
+    }
+
+    candidates.sort((a, b) => a.dist - b.dist);
+    for (let i = 0; i < candidates.length; i++) {
+      const rec = candidates[i];
+      const active = i < budget;
+      rec.light.visible = active;
+      if (!active) { if (rec.light.castShadow) rec.light.castShadow = false; continue; }
+      const wantShadow = i < shadowBudget && !rec.fill && rec.base > 1.2 * LIGHT_SCALE;
+      if (rec.light.castShadow !== wantShadow) {
+        rec.light.castShadow = wantShadow;
+        if (wantShadow) {
+          const s = Settings.shadowMapSize();
+          rec.light.shadow.mapSize.set(s, s);
+          rec.light.shadow.camera.near = 0.25;
+          rec.light.shadow.camera.far = rec.light.distance || 20;
+          rec.light.shadow.bias = -0.004;
+          rec.light.shadow.normalBias = 0.035;
+        }
+      }
+      if (rec.flicker > 0) {
+        const n = Math.sin(t * 13.1 + rec.dist) * 0.5 + Math.sin(t * 27.7 + rec.dist * 1.7) * 0.3 + Math.sin(t * 5.3) * 0.2;
+        rec.light.intensity = rec.base * (1 + n * rec.flicker);
+      } else if (rec.light.intensity !== rec.base) {
+        rec.light.intensity = rec.base;
+      }
+    }
+
+    if (this.bolt) {
+      this.nextBolt -= dt;
+      if (this.nextBolt <= 0) {
+        this.boltT = 0.42;
+        this.nextBolt = 6 + Math.random() * 14;
+      }
+      if (this.boltT > 0) {
+        this.boltT -= dt;
+        const f = Math.max(0, this.boltT);
+        this.bolt.intensity = (Math.random() > 0.35 ? 1 : 0.2) * f * 16;
+      } else this.bolt.intensity = 0;
+    }
+  }
+
+  update(t, dt, camPos) {
+    for (const e of this.roomGroups.values()) {
+      if (!e.group.visible) continue;
+      for (const fn of e.animated) fn(t);
+    }
+    this.updateDoors(dt);
+    this.updateParticles(dt, camPos);
+    this.updateLights(camPos, t, dt);
+  }
+
+  dispose() {
+    for (const n of this.npcs.values()) n.dispose();
+    this.npcs.clear();
+    for (const d of this.disposables) { try { d.dispose(); } catch (e) { /* ignore */ } }
+    this.disposables.length = 0;
+    this.mats.dispose();
+    if (this.particles) this.scene.remove(this.particles.pts);
+    if (this.bolt) this.scene.remove(this.bolt);
+    this.scene.remove(this.root);
+    this.root.traverse((o) => {
+      if (o.geometry && !o.geometry.__shared) { try { o.geometry.dispose(); } catch (e) { /* ignore */ } }
+    });
+  }
+}
+
+const _v = new THREE.Vector3();
+
+// Rescales a box's UVs so the texture tiles at a constant real-world size
+// regardless of how big the box is.
+function tileUv(geom, mat, su, sv) {
+  const d = (mat && mat.userData && mat.userData.density) || 0.3;
+  const uv = geom.attributes.uv;
+  if (!uv) return geom;
+  for (let i = 0; i < uv.count; i++) {
+    uv.setXY(i, uv.getX(i) * su * d, uv.getY(i) * sv * d);
+  }
+  uv.needsUpdate = true;
+  return geom;
+}
+
+function corridorLength(p) {
+  let L = 0;
+  for (let i = 0; i < p.length - 1; i++) L += Math.hypot(p[i + 1].x - p[i].x, p[i + 1].z - p[i].z);
+  return L;
+}
+
+function pointAlong(p, dist) {
+  let L = 0;
+  for (let i = 0; i < p.length - 1; i++) {
+    const seg = Math.hypot(p[i + 1].x - p[i].x, p[i + 1].z - p[i].z);
+    if (L + seg >= dist) {
+      const f = seg < 0.001 ? 0 : (dist - L) / seg;
+      return { x: p[i].x + (p[i + 1].x - p[i].x) * f, z: p[i].z + (p[i + 1].z - p[i].z) * f };
+    }
+    L += seg;
+  }
+  return p[p.length - 1];
+}

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Verrow — Branch Maps</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%238fe0ff' d='M12 1.5 21 7v10l-9 5.5L3 17V7l9-5.5Z'/></svg>">
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/build/three.module.js",
+    "three/addons/": "./vendor/three/examples/jsm/"
+  }
+}
+</script>
+<style>
+  :root {
+    --ink: #0a0d12; --panel: #111721; --line: rgba(170,200,215,.15);
+    --line2: rgba(170,200,215,.32); --paper: #e6e1d6; --muted: #78838f;
+    --salt: #9fe4ff; --brass: #e0c878; --blood: #d4564a; --green: #7fd8a0; --violet: #b9a0e0;
+    --sans: 'Inter','Segoe UI',system-ui,-apple-system,sans-serif;
+    --serif: Georgia,'Palatino Linotype',serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ink); color: var(--paper); font-family: var(--sans); font-size: 14px; }
+  header { padding: 22px 28px 16px; border-bottom: 1px solid var(--line); }
+  h1 { margin: 0 0 4px; font-family: var(--serif); font-weight: 400; font-size: 27px; letter-spacing: .14em; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .warn { margin-top: 10px; font-size: 12.5px; color: var(--brass); }
+
+  nav { display: flex; flex-wrap: wrap; gap: 4px; padding: 12px 28px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--ink); z-index: 5; }
+  nav button { padding: 8px 13px; background: rgba(255,255,255,.04); border: 1px solid var(--line); border-radius: 3px; color: var(--muted); cursor: pointer; font-size: 13px; font-family: var(--sans); }
+  nav button:hover { color: var(--paper); border-color: var(--line2); }
+  nav button.on { background: rgba(159,228,255,.13); border-color: rgba(159,228,255,.45); color: var(--salt); }
+  .spacer { flex: 1; }
+  .toggle { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; cursor: pointer; user-select: none; }
+  .toggle input { accent-color: var(--blood); }
+
+  main { padding: 22px 28px 60px; }
+  .floor-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 4px; flex-wrap: wrap; }
+  .floor-head h2 { margin: 0; font-family: var(--serif); font-weight: 400; font-size: 24px; letter-spacing: .06em; }
+  .floor-head .ward { font-family: var(--serif); font-style: italic; color: var(--salt); font-size: 14px; }
+  .theme-chip { font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; padding: 3px 8px; border: 1px solid var(--line2); border-radius: 2px; color: var(--muted); }
+
+  .stats { display: flex; flex-wrap: wrap; gap: 7px; margin: 14px 0 16px; }
+  .stat { padding: 9px 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 3px; min-width: 86px; }
+  .stat b { display: block; font-family: var(--serif); font-size: 21px; font-weight: 400; }
+  .stat span { display: block; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-top: 2px; }
+
+  .mapwrap { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 10px; overflow: auto; }
+  .mapwrap svg { display: block; width: 100%; height: auto; max-height: 78vh; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 14px; font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 22px; font-size: 12.5px; }
+  th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line2); color: var(--muted); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; font-weight: 600; }
+  td { padding: 7px 10px; border-bottom: 1px solid rgba(170,200,215,.07); vertical-align: top; }
+  td.mono { font-family: ui-monospace, Consolas, monospace; color: var(--muted); }
+  .pill { display: inline-block; padding: 2px 7px; border-radius: 2px; font-size: 10.5px; letter-spacing: .06em; border: 1px solid var(--line2); color: var(--muted); }
+  .hidden-cell { color: #3d444d; font-style: italic; }
+  .err { color: var(--blood); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>THE VERROW — BRANCH MAPS</h1>
+    <div class="sub">Floor plans solved from the authored room graphs by the same layout code the game uses. What you see here is what gets built.</div>
+    <div class="warn" id="warn">Story reveal is off. Room kinds, dead ends, the Ward Token route, NPCs and items are hidden.</div>
+  </header>
+  <nav id="nav"></nav>
+  <main id="main">Loading floors…</main>
+  <script type="module" src="./src/debug.js"></script>
+</body>
+</html>
