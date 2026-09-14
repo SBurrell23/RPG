@@ -135,6 +135,27 @@ from the graphics settings. Point light intensities are in candela — three.js 
 physical units since r155 — and are scaled from the themes' perceptual numbers by a single
 constant in `builder.js`.
 
+### Storage on a shared origin
+
+Every GitHub Pages project site belonging to one account is served from the same
+origin, so every game deployed under `<user>.github.io` shares a single
+`localStorage` bucket. `src/engine/storage.js` is the only module that touches it:
+
+- every key is prefixed `verrow:`, so a neighbouring game's `save` or `settings`
+  cannot collide with ours;
+- nothing outside that prefix is ever read, written, enumerated or removed — there
+  is deliberately no "clear everything" path, since on a shared origin that would
+  destroy another game's data;
+- everything read back is treated as untrusted. Settings values are validated
+  against the schema (wrong type → default, out of range → clamped, unknown option
+  → default) and saves are structurally checked before use, so a half-written value
+  or a same-named key from another app degrades to defaults instead of breaking the
+  title screen;
+- storage being unavailable or full (private window, blocked site data, another
+  game having exhausted the quota) is handled — the game runs unsaved.
+
+Keys from the pre-namespace build are migrated automatically on first load.
+
 ## Content
 
 171 rooms, 115 speaking characters, ~43,000 words of dialogue, 10 floor themes,

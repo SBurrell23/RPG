@@ -33,7 +33,11 @@ html, body {
 #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 
 #ui { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
-#ui > * { pointer-events: auto; }
+/* Overlays opt into input only while they are actually shown. A blanket
+   `#ui > * { pointer-events: auto }` here would win on specificity over each
+   overlay's own `pointer-events: none`, leaving every hidden panel stretched
+   across the screen eating clicks meant for whatever is underneath. Each
+   component declares its own `.show` state instead. */
 
 kbd {
   display: inline-block; min-width: 1.55em; padding: 0.12em 0.4em;
@@ -70,6 +74,7 @@ button { font-family: var(--sans); cursor: pointer; }
 /* --------------------------------------------------------- title screen */
 
 .title-screen {
+  /* stacking order: hud < dialogue(15) < title(60) < panels(80) < loading(100) */
   position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
   background: radial-gradient(ellipse at 50% 40%, #0e161d 0%, #05070a 72%);
   opacity: 0; pointer-events: none; transition: opacity 0.7s ease;
@@ -264,7 +269,7 @@ button { font-family: var(--sans); cursor: pointer; }
 
 /* ------------------------------------------------------------- dialogue */
 
-.dlg { position: absolute; inset: 0; opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
+.dlg { position: absolute; inset: 0; z-index: 15; opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
 .dlg.show { opacity: 1; pointer-events: auto; }
 .dlg-scrim {
   position: absolute; inset: 0;
@@ -321,7 +326,7 @@ button { font-family: var(--sans); cursor: pointer; }
 .panel {
   position: absolute; inset: 0; display: grid; place-items: center;
   background: rgba(3, 5, 8, 0.78); opacity: 0; pointer-events: none;
-  transition: opacity 0.22s ease; z-index: 20;
+  transition: opacity 0.22s ease; z-index: 80;
 }
 .panel.show { opacity: 1; pointer-events: auto; }
 .panel-box {

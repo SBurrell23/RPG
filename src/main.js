@@ -84,6 +84,7 @@ class Game {
   async begin(classId) {
     Audio.init();
     Audio.resume();
+    this.closePanels();
     this.state.reset(classId);
     this.title.hide();
     this.title.stopBackdrop();
@@ -93,6 +94,7 @@ class Game {
   async continueRun() {
     Audio.init();
     Audio.resume();
+    this.closePanels();
     const save = GameState.peek();
     if (!save || !this.state.load(save)) return;
     this.title.hide();
@@ -104,7 +106,7 @@ class Game {
     GameState.clearSave();
     this.teardownFloor();
     Audio.stopAmbience();
-    this.pause.hide();
+    this.closePanels();
     this.hud.setVisible(false);
     this.mode = 'title';
     this.title.stage = 'menu';
@@ -334,16 +336,23 @@ class Game {
   // --------------------------------------------------------------- input
 
   onKey(e) {
+    // Panels can be opened from the title screen (Settings), so Escape has to
+    // dismiss them before the title/ended early-out below.
+    if (this.settings.open) {
+      if (e.code === 'Escape') {
+        e.preventDefault();
+        this.settings.hide();
+        if (this.mode === 'play' && !this.pause.open) this.setPaused(true);
+      }
+      return;
+    }
+
     if (this.mode === 'title' || this.mode === 'ended') return;
 
     if (e.code === 'F3') { e.preventDefault(); this.hud.togglePerf(); return; }
 
     if (this.shop.open) {
       if (e.code === 'Escape' || e.code === 'Tab') { e.preventDefault(); this.shop.hide(); }
-      return;
-    }
-    if (this.settings.open) {
-      if (e.code === 'Escape') { e.preventDefault(); this.settings.hide(); if (this.mode === 'play' && !this.pause.open) this.setPaused(true); }
       return;
     }
     if (this.inventory.open) {
@@ -362,6 +371,13 @@ class Game {
     if (e.code === 'Escape') { e.preventDefault(); this.setPaused(true); return; }
     if (e.code === 'Tab') { e.preventDefault(); this.inventory.show(); this.player.releaseLock(); return; }
     if (e.code === 'KeyE') { e.preventDefault(); this.talk(); }
+  }
+
+  closePanels() {
+    this.pause.hide();
+    this.settings.hide();
+    this.inventory.hide();
+    this.shop.hide();
   }
 
   setPaused(on) {

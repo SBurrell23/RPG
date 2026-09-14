@@ -1,7 +1,9 @@
 // Persisted user settings. Any consumer can subscribe; changes flagged `hard`
 // cause the renderer to be rebuilt (antialias mode can't change on a live context).
 
-const KEY = 'verrow.settings.v1';
+import * as Storage from './storage.js';
+
+const KEY = 'settings:v1';
 
 export const SCHEMA = {
   graphics: {
@@ -75,15 +77,35 @@ for (const group of Object.values(SCHEMA)) {
 let values = { ...defaults };
 const listeners = new Set();
 
-try {
-  const raw = localStorage.getItem(KEY);
-  if (raw) {
-    const parsed = JSON.parse(raw);
-    for (const k of Object.keys(defaults)) {
-      if (parsed[k] !== undefined) values[k] = parsed[k];
+// Coerces one stored value onto the schema, or returns undefined if it is not
+// something this field could ever legitimately hold. Storage is shared with
+// every other game on this origin, so a value under our key is not proof that
+// we wrote it.
+function sanitise(field, value) {
+  if (value === undefined || value === null) return undefined;
+  if (field.type === 'toggle') {
+    return typeof value === 'boolean' ? value : undefined;
+  }
+  if (field.type === 'range') {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return undefined;
+    return Math.min(field.max, Math.max(field.min, n));
+  }
+  // select: must be one of the offered options, matched loosely so that a
+  // number stored as a string still resolves to the typed option value
+  const match = field.options.find(([v]) => String(v) === String(value));
+  return match ? match[0] : undefined;
+}
+
+const stored = Storage.readJSON(KEY);
+if (stored) {
+  for (const group of Object.values(SCHEMA)) {
+    for (const f of group.fields) {
+      const clean = sanitise(f, stored[f.id]);
+      if (clean !== undefined) values[f.id] = clean;
     }
   }
-} catch (e) { /* storage blocked; defaults are fine */ }
+}
 
 export const settings = new Proxy(values, {
   get: (t, k) => t[k],
@@ -126,7 +148,7 @@ function findField(id) {
 }
 
 function persist() {
-  try { localStorage.setItem(KEY, JSON.stringify(values)); } catch (e) { /* ignore */ }
+  Storage.writeJSON(KEY, values);
 }
 
 function emit(ev) { for (const fn of listeners) fn(ev); }

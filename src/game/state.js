@@ -1,9 +1,10 @@
 // The player's run. Everything the story can read or change lives here.
 
-import { getClass } from '../data/classes.js';
+import { getClass, CLASSES } from '../data/classes.js';
 import { getItem } from '../data/items.js';
+import * as Storage from '../engine/storage.js';
 
-const SAVE_KEY = 'verrow.save.v1';
+const SAVE_KEY = 'save:v1';
 
 export class GameState {
   constructor() {
@@ -157,7 +158,7 @@ export class GameState {
   }
 
   load(data) {
-    if (!data || data.v !== 1) return false;
+    if (!validSave(data)) return false;
     Object.assign(this, {
       classId: data.classId, hearts: data.hearts, maxHearts: data.maxHearts ?? 3,
       gold: data.gold, items: data.items || {},
@@ -175,18 +176,41 @@ export class GameState {
   }
 
   save() {
-    try { localStorage.setItem(SAVE_KEY, JSON.stringify(this.serialize())); return true; }
-    catch (e) { return false; }
+    return Storage.writeJSON(SAVE_KEY, this.serialize());
   }
 
+  // Returns a save only if it is genuinely one of ours and structurally sound.
+  // This origin is shared with every other game deployed to the same
+  // github.io account, so an unrecognised blob is ignored, not trusted.
   static peek() {
-    try {
-      const raw = localStorage.getItem(SAVE_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch (e) { return null; }
+    const data = Storage.readJSON(SAVE_KEY);
+    return validSave(data) ? data : null;
   }
 
   static clearSave() {
-    try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* ignore */ }
+    Storage.remove(SAVE_KEY);
   }
+}
+
+const CLASS_IDS = new Set(CLASSES.map((c) => c.id));
+const isNum = (n) => typeof n === 'number' && Number.isFinite(n);
+const isStrArray = (a) => Array.isArray(a) && a.every((x) => typeof x === 'string');
+
+function validSave(d) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
+  if (d.v !== 1) return false;
+  if (!CLASS_IDS.has(d.classId)) return false;
+  if (!isNum(d.hearts) || d.hearts < 0 || d.hearts > 16) return false;
+  if (!isNum(d.gold) || d.gold < 0) return false;
+  if (!isNum(d.floorIndex) || d.floorIndex < 1 || d.floorIndex > 10) return false;
+  if (!d.items || typeof d.items !== 'object' || Array.isArray(d.items)) return false;
+  for (const n of Object.values(d.items)) if (!isNum(n)) return false;
+  if (d.flags !== undefined && !isStrArray(d.flags)) return false;
+  if (d.visited !== undefined && !isStrArray(d.visited)) return false;
+  if (d.unlocked !== undefined && !isStrArray(d.unlocked)) return false;
+  if (d.relocked !== undefined && !isStrArray(d.relocked)) return false;
+  if (d.tokens !== undefined && !Array.isArray(d.tokens)) return false;
+  if (d.codex !== undefined && !Array.isArray(d.codex)) return false;
+  if (d.roomId !== undefined && d.roomId !== null && typeof d.roomId !== 'string') return false;
+  return true;
 }
